@@ -85,6 +85,7 @@ void load_pos_windows(const string& prefix, const string& filename, vector<Mat>&
 	while (true){
 		string line;
 		pos_lst_file >> line;
+		cout << "line = " << line << endl;
 		if (line.empty()){ // no more file to read
 			break;
 		}
@@ -132,6 +133,10 @@ void load_pos_windows(const string& prefix, const string& filename, vector<Mat>&
 			Mat pos_window = img(Rect(x, y, width, height));
 			resize(pos_window, pos_window, mySize, 0, 0, CV_INTER_LINEAR);
 			pos_lst.push_back(pos_window.clone()); //真心不知道clone有啥效果
+			string save_prefix = "E:/data-USA/work/tmp/";
+
+			imwrite(save_prefix + line, pos_window);
+			cout << ".";
 		}
 		//cout << "本annotation file处理完毕" << endl << endl;
 	}
@@ -199,6 +204,7 @@ void compute_hog(const vector< Mat > & img_lst, vector< Mat > & gradient_lst, co
 	vector< Mat >::const_iterator end = img_lst.end();
 	for (; img != end; ++img){
 		cvtColor(*img, gray, COLOR_BGR2GRAY);
+		equalizeHist(gray, gray);
 		hog.compute(gray, descriptors, Size(8, 8), Size(0, 0), location);
 		Mat tmpImg = Mat(descriptors).clone();
 		//gradient_lst.push_back(Mat(descriptors).clone());
@@ -248,24 +254,48 @@ void test_and_evaluate(const Size & size){
 		//cout << "处理：" << ImgName << endl;
 		ImgName = inria_test_data_dir + ImgName;//加上正样本的路径名
 		Mat img = imread(ImgName);//读取图片
+		Mat gray;
+		cvtColor(img, gray, cv::COLOR_RGB2GRAY);
+		equalizeHist(gray, gray);
 
-		locations.clear();
-		foundWeights.clear();
 		//进行检测
-		my_hog.detectMultiScale(img, locations, foundWeights);
+		my_hog.detectMultiScale(gray, locations, foundWeights);
 		/*
 		CV_WRAP virtual void detectMultiScale(const Mat& img, CV_OUT vector<Rect>& foundLocations,
 		CV_OUT vector<double>& foundWeights, double hitThreshold = 0,
 		Size winStride = Size(), Size padding = Size(), double scale = 1.05,
 		double finalThreshold = 2.0, bool useMeanshiftGrouping = false) const;
 		*/
-		//defaultHog.detectMultiScale(img, found, 0, cv::Size(8, 8), cv::Size(32, 32), 1.05, 2);
-		//
 
-		//画长方形，框出行人
-		for (int i = 0; i < locations.size(); i++){
-			Rect r = locations[i];
-			foutPos << (num + 1) << "," << r.x << "," << r.y << "," << r.width << "," << r.height << "," << foundWeights[i] << endl;
+		vector<Rect> found, found_filtered;
+		vector<double> foundWeights, foundWeights_filtered;
+		//进行检测
+		my_hog.detectMultiScale(gray, found, foundWeights);
+
+		size_t i, j;
+		for (i = 0; i < found.size(); i++){
+			Rect r = found[i];
+
+			//下面的这个for语句是找出所有没有嵌套的矩形框r,并放入found_filtered中,如果有嵌套的
+			//话,则取外面最大的那个矩形框放入found_filtered中
+			for (j = 0; j < found.size(); j++){
+				if (j != i && (r&found[j]) == r) break;
+			}
+			if (j == found.size()){
+				found_filtered.push_back(r);
+				foundWeights_filtered.push_back(foundWeights[i]);
+			}
+		}
+
+		//在图片img上画出矩形框,因为hog检测出的矩形框比实际人体框要稍微大些,所以这里需要
+		//做一些调整
+		for (i = 0; i <found_filtered.size(); i++){
+			Rect r = found_filtered[i];
+			r.x += cvRound(r.width*0.1);
+			r.width = cvRound(r.width*0.8);
+			r.y += cvRound(r.height*0.07);
+			r.height = cvRound(r.height*0.8);
+			foutPos << (num + 1) << "," << r.x << "," << r.y << "," << r.width << "," << r.height << "," << foundWeights_filtered[i] << endl;
 		}
 		cout << ".";
 	}
@@ -299,7 +329,7 @@ void get_hard_examples(const vector<Mat>& neg_lst, vector<Mat>& hard_lst, const 
 			Rect r = locations[i];
 			Mat hard_example = img(locations[i]);
 			resize(hard_example, hard_example, mySize, 0, 0, CV_INTER_LINEAR);
-			hard_lst.push_back(hard_example);
+			hard_lst.push_back(hard_example.clone());
 		}
 	}
 }
@@ -315,12 +345,13 @@ int do_train(){
 	string pos = "pos.lst";
 	string neg = "neg.lst";
 	string annotation_dir = "E:/data-USA/work/data/Inria/train/posGt/";
-	Size mySize(64, 128);
+	Size mySize(90, 160);
 
 	//准备positive training data
 	cout << "Loading Positive Training Samples..." << endl;
 	load_pos_windows(train_path_prefix, pos, pos_lst, annotation_dir, mySize);
 	cout << "\n===\nLoad Positive Training Samples Done." << endl;
+	/*
 	labels.assign(pos_lst.size(), +1);
 	const unsigned int old = (unsigned int)labels.size();
 
@@ -354,14 +385,81 @@ int do_train(){
 	//第二次训练
 	train_svm(gradient_lst, labels);
 	cout << "\n===\nSecond Train svm Done." << endl;
-
+	*/
 	return 0;
 
 }
 
+void postProcessRectangle(){
+	String inria_test_data_dir = "E:/data-USA/work/data/Inria/test/";
+	string prefix = "E:/data-USA/eval_file/";
+	ifstream fin(prefix+"71%_defaultOpenCV_V000.txt");
+	ofstream foutPos(inria_test_data_dir + "absorbed_V000.txt");
+	string bbs;
+
+	vector<Rect> found, found_filtered;
+	vector<double> foundWeights, foundWeights_filtered;
+	int model_id = 1;
+	while (true){
+		getline(fin, bbs);
+		if (bbs.empty()){
+			break;
+		}
+		stringstream dataStream(bbs);
+		int imgId;
+		int x, y, width, height;
+		float score;
+		char comma;
+		dataStream >> imgId >> comma >> x >> comma >> y >> comma >> width >> comma >> height >> comma >> score;
+		//cout << imgId << "," << x << "," << y << "," << width << "," << height << "," << score << endl;
+		
+		if (imgId != model_id){
+			size_t i, j;
+			for (i = 0; i < found.size(); i++){
+				Rect r = found[i];
+
+				//下面的这个for语句是找出所有没有嵌套的矩形框r,并放入found_filtered中,如果有嵌套的
+				//话,则取外面最大的那个矩形框放入found_filtered中
+				for (j = 0; j < found.size(); j++){
+					if (j != i && (r&found[j]) == r) break;
+				}
+				if (j == found.size()){
+					found_filtered.push_back(r);
+					foundWeights_filtered.push_back(foundWeights[i]);
+				}
+			}
+
+			//在图片img上画出矩形框,因为hog检测出的矩形框比实际人体框要稍微大些,所以这里需要
+			//做一些调整
+			for (i = 0; i <found_filtered.size(); i++){
+				Rect r = found_filtered[i];
+				r.x += cvRound(r.width*0.1);
+				r.width = cvRound(r.width*0.8);
+				r.y += cvRound(r.height*0.07);
+				r.height = cvRound(r.height*0.8);
+				foutPos << model_id << "," << r.x << "," << r.y << "," << r.width << "," << r.height << "," << foundWeights_filtered[i] << endl;
+			}
+
+			found.clear();
+			foundWeights.clear();
+			found_filtered.clear();
+			foundWeights_filtered.clear();
+			model_id = imgId;
+			continue;
+		}
+
+		found.push_back(Rect(x, y, width, height));
+		foundWeights.push_back(score);
+
+		
+	}
+	fin.close();
+}
+
 int main(){
-	//do_train();
-	test_and_evaluate(Size(64, 128));
+	do_train();
+	//test_and_evaluate(Size(64, 128));
+	//postProcessRectangle();
 	system("pause");
 	return 0;
 }
